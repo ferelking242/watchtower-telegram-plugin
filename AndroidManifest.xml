@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.watchtower.telegram_source"
+    android:versionCode="1"
+    android:versionName="1.0.0">
+
+    <!-- Permissions réseau Telegram -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Lecture/écriture stockage temporaire pour les chunks -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
+
+    <!-- Foreground service pour le streaming en arrière-plan -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <application
+        android:label="Telegram Source"
+        android:icon="@mipmap/ic_launcher"
+        android:allowBackup="false"
+        android:supportsRtl="true"
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:extractNativeLibs="true">
+
+        <!-- Metadata Watchtower plugin — identifie ce fichier APK comme un plugin -->
+        <meta-data
+            android:name="watchtower.plugin.id"
+            android:value="com.watchtower.telegram-source" />
+        <meta-data
+            android:name="watchtower.plugin.version"
+            android:value="1.0.0" />
+        <meta-data
+            android:name="watchtower.plugin.runtime"
+            android:value="python3.11" />
+        <meta-data
+            android:name="watchtower.plugin.entry"
+            android:value="script.py" />
+        <meta-data
+            android:name="watchtower.plugin.type"
+            android:value="source" />
+        <meta-data
+            android:name="watchtower.plugin.category"
+            android:value="reader" />
+
+        <!-- Aucune Activity visible — plugin headless uniquement -->
+
+    </application>
+
+</manifest>
