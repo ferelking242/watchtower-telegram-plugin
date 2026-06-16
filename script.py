@@ -7,9 +7,10 @@ Logs/erreurs → stderr uniquement (stdout réservé aux données)
 Commandes :
   --action auth_send_code    : Envoie OTP au téléphone → retourne phone_code_hash
   --action auth_verify_code  : Vérifie le code OTP → retourne session_string
+  --action auth_check_password : Vérifie le mot de passe 2FA → retourne session_string
   --action metadata          : Metadata du canal (cover, desc, subscribers)
-  --action list              : Liste des fichiers CBR/CBZ/ZIP/PDF/EPUB
-  --action stream            : Stream binaire d'un fichier via stdout
+  --action list              : Liste des fichiers CBR/CBZ/ZIP/PDF/EPUB (sans thumbs inline)
+  --action stream            : Stream binaire via temp file → stdout (pas d'OOM)
   --action search            : Recherche dans les messages du canal
   --action thumbnail         : Thumbnail base64 d'un fichier spécifique
 """
@@ -22,6 +23,7 @@ import asyncio
 import argparse
 import base64
 import time
+import tempfile
 import logging
 from io import BytesIO
 
@@ -35,7 +37,7 @@ try:
     from pyrogram.errors import (
         FloodWait, UserDeactivated, AuthKeyUnregistered,
         PhoneCodeInvalid, PhoneCodeExpired, SessionPasswordNeeded,
-        PhoneNumberInvalid, PhoneNumberBanned,
+        PhoneNumberInvalid, PhoneNumberBanned, PasswordHashInvalid,
     )
     from pyrogram.sessions import StringSession
 except ImportError as e:
@@ -173,16 +175,52 @@ async def action_auth_verify_code(api_id: int, api_hash: str, phone: str,
         try:
             user = await client.sign_in(phone, phone_code_hash, code)
         except SessionPasswordNeeded:
-            # Compte avec 2FA — on retourne un statut spécial
             out_json({"status": "2fa_required",
-                      "error": "Ce compte a la vérification en 2 étapes activée. "
-                               "La 2FA n'est pas encore supportée."})
+                      "error": "Ce compte a la vérification en 2 étapes activée."})
             return
         except PhoneCodeInvalid:
             out_json({"status": "error", "error": "Code incorrect."})
             return
         except PhoneCodeExpired:
             out_json({"status": "error", "error": "Code expiré. Renvoie un nouveau code."})
+            return
+
+        session_str = await client.export_session_string()
+        out_json({
+            "status": "ok",
+            "data": {
+                "session_string": session_str,
+                "user_id": user.id if hasattr(user, "id") else None,
+                "first_name": getattr(user, "first_name", ""),
+                "username": getattr(user, "username", ""),
+            }
+        })
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# ACTION : auth_check_password  (2FA — vérifie le mot de passe cloud)
+# ---------------------------------------------------------------------------
+async def action_auth_check_password(api_id: int, api_hash: str, password: str):
+    client = Client(
+        name="watchtower_auth",
+        api_id=api_id,
+        api_hash=api_hash,
+        in_memory=True,
+    )
+    try:
+        await client.connect()
+        try:
+            user = await client.check_password(password)
+        except PasswordHashInvalid:
+            out_json({"status": "error", "error": "Mot de passe 2FA incorrect."})
+            return
+        except FloodWait as fw:
+            out_json({"status": "error", "error": f"Trop de tentatives 2FA. Réessayez dans {fw.value}s."})
             return
 
         session_str = await client.export_session_string()
@@ -237,18 +275,16 @@ async def action_metadata(api_id: int, api_hash: str, session: str,
 
 
 # ---------------------------------------------------------------------------
-# ACTION : list
+# ACTION : list  — SANS thumbs inline (lazy via action_thumbnail)
 # ---------------------------------------------------------------------------
 async def action_list(api_id: int, api_hash: str, session: str,
                       channel: str, offset: int, limit: int, timeout: int):
     client = make_client(api_id, api_hash, session)
     items = []
-    total_scanned = 0
     max_scan = limit * 20
 
     async with client:
         async for msg in client.get_chat_history(channel, limit=max_scan):
-            total_scanned += 1
             if not is_supported_doc(msg):
                 continue
 
@@ -256,23 +292,14 @@ async def action_list(api_id: int, api_hash: str, session: str,
             fname = doc.file_name or f"file_{msg.id}"
             ext = os.path.splitext(fname)[1].lower()
 
-            thumb_b64 = None
-            if doc.thumbs:
-                try:
-                    buf = BytesIO()
-                    await _retry(lambda: client.download_media(
-                        doc.thumbs[-1].file_id, file=buf))
-                    thumb_b64 = base64.b64encode(buf.getvalue()).decode()
-                except Exception:
-                    pass
-
+            # PAS de download thumbnail ici — utiliser action_thumbnail à la demande
             items.append({
                 "msg_id": msg.id,
                 "title": os.path.splitext(fname)[0],
                 "filename": fname,
                 "size": doc.file_size or 0,
                 "date": msg.date.isoformat() if msg.date else None,
-                "cover_thumb_b64": thumb_b64,
+                "has_thumb": bool(doc.thumbs),   # indique si un thumb est disponible
                 "mime_type": doc.mime_type or "application/octet-stream",
                 "ext": ext,
                 "caption": msg.caption or "",
@@ -295,51 +322,65 @@ async def action_list(api_id: int, api_hash: str, session: str,
 
 
 # ---------------------------------------------------------------------------
-# ACTION : stream
+# ACTION : stream  — via temp file (PAS de BytesIO → pas d'OOM)
 # ---------------------------------------------------------------------------
 async def action_stream(api_id: int, api_hash: str, session: str,
                         channel: str, msg_id: int, chunk_size: int, timeout: int):
     global _stream_cancelled
     client = make_client(api_id, api_hash, session)
 
-    async with client:
-        msg = await _retry(lambda: client.get_messages(channel, msg_id))
-        if not msg or not msg.document:
-            out_json({"status": "error", "error": "Message ou document introuvable"})
-            return
+    # Fichier temporaire sur disque — évite de charger tout en RAM
+    tmp_fd, tmp_path = tempfile.mkstemp(prefix="wt_tg_", suffix=".tmp")
+    os.close(tmp_fd)
 
-        total_size = msg.document.file_size or 0
+    try:
+        async with client:
+            msg = await _retry(lambda: client.get_messages(channel, msg_id))
+            if not msg or not msg.document:
+                out_json({"status": "error", "error": "Message ou document introuvable"})
+                return
+
+            total_size = msg.document.file_size or 0
+
+            # Téléchargement vers disque (Pyrogram gère le chunking réseau)
+            await _retry(lambda: client.download_media(msg.document, file_name=tmp_path))
+
+        # Stream depuis le disque → stdout par chunks
+        actual_size = os.path.getsize(tmp_path)
         downloaded = 0
         start_time = time.time()
 
-        buf = BytesIO()
-        await _retry(lambda: client.download_media(msg.document, file=buf))
-        data = buf.getvalue()
-        total_size = len(data)
+        with open(tmp_path, "rb") as f:
+            while True:
+                if _stream_cancelled:
+                    log.info("Stream annulé proprement")
+                    return
 
-        pos = 0
-        while pos < total_size:
-            if _stream_cancelled:
-                log.info("Stream annulé proprement")
-                return
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
 
-            chunk = data[pos:pos + chunk_size]
-            sys.stdout.buffer.write(chunk)
-            sys.stdout.buffer.flush()
-            pos += len(chunk)
-            downloaded += len(chunk)
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.buffer.flush()
+                downloaded += len(chunk)
 
-            elapsed = time.time() - start_time
-            speed = downloaded / elapsed if elapsed > 0 else 0
-            progress = int((downloaded / total_size) * 100) if total_size > 0 else 0
-            err_json({
-                "type": "progress",
-                "progress": progress,
-                "downloaded": downloaded,
-                "total": total_size,
-                "speed_bps": int(speed),
-                "speed_human": f"{speed/1024/1024:.1f} MB/s",
-            })
+                elapsed = time.time() - start_time
+                speed = downloaded / elapsed if elapsed > 0 else 0
+                progress = int((downloaded / actual_size) * 100) if actual_size > 0 else 0
+                err_json({
+                    "type": "progress",
+                    "progress": progress,
+                    "downloaded": downloaded,
+                    "total": actual_size,
+                    "speed_bps": int(speed),
+                    "speed_human": f"{speed/1024/1024:.1f} MB/s",
+                })
+
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +405,7 @@ async def action_search(api_id: int, api_hash: str, session: str,
                 "date": msg.date.isoformat() if msg.date else None,
                 "mime_type": doc.mime_type or "application/octet-stream",
                 "caption": msg.caption or "",
+                "has_thumb": bool(doc.thumbs),
             })
 
     out_json({
@@ -402,13 +444,21 @@ async def action_thumbnail(api_id: int, api_hash: str, session: str,
                 log.warning(f"Thumb Telegram non disponible: {e}")
 
         if not thumb_b64:
+            # Essai extraction cover depuis l'archive (téléchargement complet)
             try:
-                small_buf = BytesIO()
-                await _retry(lambda: client.download_media(doc, file=small_buf))
-                archive_bytes = small_buf.getvalue()
+                tmp_fd, tmp_path = tempfile.mkstemp(prefix="wt_thumb_", suffix=".tmp")
+                os.close(tmp_fd)
+                await _retry(lambda: client.download_media(doc, file_name=tmp_path))
+                with open(tmp_path, "rb") as f:
+                    archive_bytes = f.read()
                 thumb_b64 = _extract_first_image_b64(archive_bytes, doc.file_name or "")
             except Exception as e:
                 log.warning(f"Extraction cover depuis archive échouée: {e}")
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
 
         out_json({
             "status": "ok",
@@ -463,7 +513,7 @@ def parse_args():
         add_help=True,
     )
     p.add_argument("--action",
-                   choices=["auth_send_code", "auth_verify_code",
+                   choices=["auth_send_code", "auth_verify_code", "auth_check_password",
                             "metadata", "list", "stream", "search", "thumbnail"],
                    required=True,
                    help="Action à exécuter")
@@ -476,6 +526,8 @@ def parse_args():
                    help="Hash retourné par auth_send_code (requis pour auth_verify_code)")
     p.add_argument("--code", type=str, default="",
                    help="Code OTP reçu sur Telegram (requis pour auth_verify_code)")
+    p.add_argument("--password", type=str, default="",
+                   help="Mot de passe 2FA (requis pour auth_check_password)")
     p.add_argument("--session", type=str, default="",
                    help="Session string Pyrogram (StringSession)")
     p.add_argument("--offset", type=int, default=0, help="Offset pour la liste")
@@ -501,11 +553,17 @@ async def main():
         elif args.action == "auth_verify_code":
             if not args.phone or not args.phone_code_hash or not args.code:
                 out_json({"status": "error",
-                          "error": "--phone, --phone_code_hash et --code requis pour auth_verify_code"})
+                          "error": "--phone, --phone_code_hash et --code requis"})
                 sys.exit(1)
             await action_auth_verify_code(
                 args.api_id, args.api_hash, args.phone,
                 args.phone_code_hash, args.code)
+
+        elif args.action == "auth_check_password":
+            if not args.password:
+                out_json({"status": "error", "error": "--password requis pour auth_check_password"})
+                sys.exit(1)
+            await action_auth_check_password(args.api_id, args.api_hash, args.password)
 
         elif args.action == "metadata":
             if not args.channel:
@@ -547,7 +605,7 @@ async def main():
             sys.exit(1)
 
     except AuthKeyUnregistered:
-        out_json({"status": "error", "error": "Session expirée ou invalide. Ré-authentifiez-vous avec --auth."})
+        out_json({"status": "error", "error": "Session expirée. Ré-authentifiez-vous."})
         sys.exit(1)
     except UserDeactivated:
         out_json({"status": "error", "error": "Compte Telegram désactivé."})
