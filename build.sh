@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # ============================================================
 # build.sh — Watchtower Telegram Source Plugin Builder
-# Crée un APK plugin avec libpython.so + script.py embarqués
+# Crée un ZIP plugin avec libpython.so + script.py + deps vendorées
+# Même pattern que ZeusDL / MPV dans Watchtower
 # ============================================================
 set -euo pipefail
 
 PLUGIN_ID="com.watchtower.telegram-source"
 PLUGIN_VERSION="1.0.0"
 OUTPUT_DIR="dist"
-APK_NAME="${PLUGIN_ID}_${PLUGIN_VERSION}.apk"
+PLUGIN_NAME="${PLUGIN_ID}_${PLUGIN_VERSION}"
+ZIP_NAME="${PLUGIN_NAME}.zip"
+APK_NAME="${PLUGIN_NAME}.apk"
 
-PYTHON_VERSION="3.11.9"
 LIBPYTHON_ARM64_URL="https://github.com/ferelking242/watchtower-extensions/releases/download/libpython/libpython3.11_arm64.so"
 LIBPYTHON_X86_URL="https://github.com/ferelking242/watchtower-extensions/releases/download/libpython/libpython3.11_x86_64.so"
 
@@ -18,12 +20,15 @@ echo "📦 Build Watchtower Telegram Source Plugin v${PLUGIN_VERSION}"
 echo "=================================================="
 
 check_deps() {
-    for cmd in zip curl python3; do
+    for cmd in zip curl; do
         if ! command -v "$cmd" &>/dev/null; then
-            echo "❌ Dépendance manquante: $cmd"
+            echo "❌ Manque : $cmd"
             exit 1
         fi
     done
+    if ! command -v pip3 &>/dev/null && ! command -v pip &>/dev/null; then
+        echo "⚠️  pip non trouvé — les deps Python ne seront pas vendorisées"
+    fi
     echo "✅ Dépendances OK"
 }
 
@@ -31,125 +36,122 @@ setup_dirs() {
     rm -rf build/
     mkdir -p build/lib/arm64-v8a
     mkdir -p build/lib/x86_64
-    mkdir -p build/assets
+    mkdir -p build/assets/vendor
+    mkdir -p build/ui
     mkdir -p build/res/xml
     mkdir -p "$OUTPUT_DIR"
     echo "✅ Dossiers créés"
 }
 
 download_libpython() {
-    echo "⬇️  Téléchargement libpython3.11 ARM64..."
-    if curl -fsSL "$LIBPYTHON_ARM64_URL" -o "build/lib/arm64-v8a/libpython3.11.so"; then
-        echo "✅ libpython ARM64 OK"
-    else
-        echo "⚠️  libpython ARM64 non disponible — utilisation du stub"
-        echo "STUB_ARM64" > "build/lib/arm64-v8a/libpython3.11.so"
-    fi
+    echo "⬇️  libpython3.11 ARM64..."
+    curl -fsSL "$LIBPYTHON_ARM64_URL" -o "build/lib/arm64-v8a/libpython3.11.so" 2>/dev/null \
+        && echo "✅ ARM64 OK" \
+        || { echo "⚠️  ARM64 non disponible (stub)"; printf 'STUB_ARM64_LIBPYTHON' > "build/lib/arm64-v8a/libpython3.11.so"; }
 
-    echo "⬇️  Téléchargement libpython3.11 x86_64..."
-    if curl -fsSL "$LIBPYTHON_X86_URL" -o "build/lib/x86_64/libpython3.11.so"; then
-        echo "✅ libpython x86_64 OK"
-    else
-        echo "⚠️  libpython x86_64 non disponible — utilisation du stub"
-        echo "STUB_X86" > "build/lib/x86_64/libpython3.11.so"
-    fi
+    echo "⬇️  libpython3.11 x86_64..."
+    curl -fsSL "$LIBPYTHON_X86_URL" -o "build/lib/x86_64/libpython3.11.so" 2>/dev/null \
+        && echo "✅ x86_64 OK" \
+        || { echo "⚠️  x86_64 non disponible (stub)"; printf 'STUB_X86_LIBPYTHON' > "build/lib/x86_64/libpython3.11.so"; }
 }
 
-bundle_python_deps() {
-    echo "📦 Bundle des dépendances Python..."
-    mkdir -p build/assets/site-packages
+vendor_python_deps() {
+    echo "📦 Vendorisation des dépendances Python..."
+    local pip_cmd="pip3"
+    command -v pip3 &>/dev/null || pip_cmd="pip"
 
-    if command -v pip3 &>/dev/null; then
-        pip3 install \
-            --target build/assets/site-packages \
-            --platform manylinux2014_aarch64 \
-            --only-binary=:all: \
-            --python-version 3.11 \
-            pyrogram==2.0.106 tgcrypto==1.2.5 2>/dev/null || \
-        pip3 install \
-            --target build/assets/site-packages \
-            pyrogram==2.0.106 tgcrypto==1.2.5
-        echo "✅ Dépendances Python bundlées"
-    else
-        echo "⚠️  pip3 non disponible — dépendances non bundlées (seront installées au runtime)"
-    fi
+    # Tente d'abord un téléchargement cross-compilé pour aarch64
+    "$pip_cmd" download \
+        --dest build/assets/vendor \
+        --platform manylinux2014_aarch64 \
+        --only-binary=:all: \
+        --python-version 3.11 \
+        --implementation cp \
+        pyrogram==2.0.106 tgcrypto==1.2.5 2>/dev/null \
+    && echo "✅ Wheels ARM64 téléchargés" \
+    || {
+        echo "⚠️  Wheels ARM64 non disponibles, fallback téléchargement générique..."
+        "$pip_cmd" download \
+            --dest build/assets/vendor \
+            pyrogram==2.0.106 tgcrypto==1.2.5 2>/dev/null \
+        && echo "✅ Wheels génériques téléchargés" \
+        || echo "⚠️  Wheels non téléchargés (seront installés au runtime)"
+    }
+
+    # Crée requirements.txt dans vendor pour le runtime
+    cp requirements.txt build/assets/vendor/requirements.txt
+    echo "✅ Dépendances vendorisées"
 }
 
 copy_assets() {
     echo "📋 Copie des assets..."
-    cp script.py          build/assets/script.py
-    cp requirements.txt   build/assets/requirements.txt
-    cp manifest.json      build/assets/manifest.json
-    cp AndroidManifest.xml build/AndroidManifest.xml
+    cp script.py              build/assets/script.py
+    cp requirements.txt       build/assets/requirements.txt
+    cp manifest.json          build/assets/manifest.json
+    cp ui/main.dart           build/ui/main.dart
+    cp AndroidManifest.xml    build/AndroidManifest.xml
     cp res/xml/network_security_config.xml build/res/xml/
-
-    python3 -c "
-import json, base64, os
-with open('manifest.json') as f:
-    m = json.load(f)
-print('Plugin ID     :', m['id'])
-print('Version       :', m['version'])
-print('Runtime       :', m.get('runtime'))
-print('Entry         :', m.get('entry'))
-"
     echo "✅ Assets copiés"
 }
 
-create_apk() {
-    echo "🔧 Création de l'APK..."
+create_zip() {
+    echo "🔧 Création du ZIP plugin..."
     cd build
-    zip -r "../${OUTPUT_DIR}/${APK_NAME}" . -x "*.DS_Store" -x "__MACOSX/*"
+    zip -r "../${OUTPUT_DIR}/${ZIP_NAME}" . -x "*.DS_Store" -x "__MACOSX/*"
     cd ..
-    SIZE=$(du -sh "${OUTPUT_DIR}/${APK_NAME}" | cut -f1)
-    echo "✅ APK créé : ${OUTPUT_DIR}/${APK_NAME} (${SIZE})"
+    local size
+    size=$(du -sh "${OUTPUT_DIR}/${ZIP_NAME}" | cut -f1)
+    echo "✅ ZIP créé : ${OUTPUT_DIR}/${ZIP_NAME} (${size})"
 }
 
-verify_apk() {
-    echo "🔍 Vérification de la structure APK..."
-    python3 -c "
-import zipfile, sys
-
-apk_path = '${OUTPUT_DIR}/${APK_NAME}'
-required = [
-    'AndroidManifest.xml',
-    'assets/manifest.json',
-    'assets/script.py',
-    'assets/requirements.txt',
-    'lib/arm64-v8a/libpython3.11.so',
-]
-
-with zipfile.ZipFile(apk_path) as z:
-    names = z.namelist()
-    ok = True
-    for req in required:
-        if req in names:
-            print(f'  ✅ {req}')
-        else:
-            print(f'  ❌ {req} MANQUANT')
-            ok = False
-
-    print(f'Total fichiers: {len(names)}')
-    if ok:
-        print('✅ Structure APK valide')
-    else:
-        print('❌ Structure APK incomplète')
-        sys.exit(1)
-"
+create_apk() {
+    echo "🔧 Création de l'APK (ZIP renommé)..."
+    cp "${OUTPUT_DIR}/${ZIP_NAME}" "${OUTPUT_DIR}/${APK_NAME}"
+    local size
+    size=$(du -sh "${OUTPUT_DIR}/${APK_NAME}" | cut -f1)
+    echo "✅ APK créé : ${OUTPUT_DIR}/${APK_NAME} (${size})"
 }
 
-# ---- Pipeline principal ----
+verify() {
+    echo "🔍 Vérification de la structure..."
+    local required=(
+        "AndroidManifest.xml"
+        "assets/manifest.json"
+        "assets/script.py"
+        "assets/requirements.txt"
+        "assets/vendor/requirements.txt"
+        "ui/main.dart"
+        "lib/arm64-v8a/libpython3.11.so"
+    )
+
+    local ok=true
+    for f in "${required[@]}"; do
+        if unzip -l "${OUTPUT_DIR}/${ZIP_NAME}" | grep -q "$f"; then
+            echo "  ✅ $f"
+        else
+            echo "  ❌ $f MANQUANT"
+            ok=false
+        fi
+    done
+
+    $ok && echo "✅ Structure valide" || { echo "❌ Structure incomplète"; exit 1; }
+}
+
+# ── Pipeline ─────────────────────────────────────────────────────────────────
 check_deps
 setup_dirs
 download_libpython
-bundle_python_deps
+vendor_python_deps
 copy_assets
+create_zip
 create_apk
-verify_apk
+verify
 
 echo ""
 echo "🎉 Build terminé !"
+echo "   ZIP : ${OUTPUT_DIR}/${ZIP_NAME}"
 echo "   APK : ${OUTPUT_DIR}/${APK_NAME}"
 echo ""
-echo "Pour tester :"
-echo "  python3 script.py --api_id YOUR_ID --api_hash YOUR_HASH --auth --phone +242XXXXXXXX"
-echo "  python3 script.py --api_id YOUR_ID --api_hash YOUR_HASH --session 'STR' --channel @moncanal --action metadata"
+echo "Pour tester le script :"
+echo "  pip3 install pyrogram tgcrypto"
+echo "  python3 script.py --api_id ID --api_hash HASH --auth --phone +242XXX"
