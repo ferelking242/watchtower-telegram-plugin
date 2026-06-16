@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <domain-config cleartextTrafficPermitted="false">
+        <!-- Telegram MTProto via TLS uniquement -->
+        <domain includeSubdomains="true">telegram.org</domain>
+        <domain includeSubdomains="true">t.me</domain>
+        <domain includeSubdomains="true">core.telegram.org</domain>
+    </domain-config>
+    <base-config cleartextTrafficPermitted="false" />
+</network-security-config>
