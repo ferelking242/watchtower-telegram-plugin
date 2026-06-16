@@ -5,12 +5,13 @@ Script Pyrogram — communication via stdout JSON / binaire raw
 Logs/erreurs → stderr uniquement (stdout réservé aux données)
 
 Commandes :
-  --auth        : Authentification OTP, retourne session_string
-  --action metadata  : Metadata du canal (cover, desc, subscribers)
-  --action list      : Liste des fichiers CBR/CBZ/ZIP/PDF/EPUB
-  --action stream    : Stream binaire d'un fichier via stdout
-  --action search    : Recherche dans les messages du canal
-  --action thumbnail : Thumbnail base64 d'un fichier spécifique
+  --action auth_send_code    : Envoie OTP au téléphone → retourne phone_code_hash
+  --action auth_verify_code  : Vérifie le code OTP → retourne session_string
+  --action metadata          : Metadata du canal (cover, desc, subscribers)
+  --action list              : Liste des fichiers CBR/CBZ/ZIP/PDF/EPUB
+  --action stream            : Stream binaire d'un fichier via stdout
+  --action search            : Recherche dans les messages du canal
+  --action thumbnail         : Thumbnail base64 d'un fichier spécifique
 """
 
 import sys
@@ -31,7 +32,11 @@ log = logging.getLogger("tgsource")
 try:
     from pyrogram import Client
     from pyrogram.types import Message
-    from pyrogram.errors import FloodWait, UserDeactivated, AuthKeyUnregistered
+    from pyrogram.errors import (
+        FloodWait, UserDeactivated, AuthKeyUnregistered,
+        PhoneCodeInvalid, PhoneCodeExpired, SessionPasswordNeeded,
+        PhoneNumberInvalid, PhoneNumberBanned,
+    )
     from pyrogram.sessions import StringSession
 except ImportError as e:
     print(json.dumps({"status": "error", "error": f"Pyrogram non disponible: {e}"}))
@@ -119,24 +124,82 @@ async def _retry(coro_fn, retries=3, base_delay=1.0):
 
 
 # ---------------------------------------------------------------------------
-# ACTION : auth
+# ACTION : auth_send_code  (étape 1 — envoie l'OTP, retourne phone_code_hash)
 # ---------------------------------------------------------------------------
-async def action_auth(api_id: int, api_hash: str, phone: str, timeout: int):
+async def action_auth_send_code(api_id: int, api_hash: str, phone: str):
     client = Client(
         name="watchtower_auth",
         api_id=api_id,
         api_hash=api_hash,
         in_memory=True,
     )
-    async with client:
+    try:
+        await client.connect()
+        sent = await client.send_code(phone)
+        out_json({
+            "status": "ok",
+            "data": {
+                "phone_code_hash": sent.phone_code_hash,
+                "type": str(sent.type),
+                "timeout": getattr(sent, "timeout", 60),
+            }
+        })
+    except PhoneNumberInvalid:
+        out_json({"status": "error", "error": "Numéro de téléphone invalide."})
+    except PhoneNumberBanned:
+        out_json({"status": "error", "error": "Ce numéro est banni de Telegram."})
+    except FloodWait as fw:
+        out_json({"status": "error", "error": f"Trop de tentatives. Réessayez dans {fw.value}s."})
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# ACTION : auth_verify_code  (étape 2 — vérifie le code, retourne session_string)
+# ---------------------------------------------------------------------------
+async def action_auth_verify_code(api_id: int, api_hash: str, phone: str,
+                                   phone_code_hash: str, code: str):
+    client = Client(
+        name="watchtower_auth",
+        api_id=api_id,
+        api_hash=api_hash,
+        in_memory=True,
+    )
+    try:
+        await client.connect()
+        try:
+            user = await client.sign_in(phone, phone_code_hash, code)
+        except SessionPasswordNeeded:
+            # Compte avec 2FA — on retourne un statut spécial
+            out_json({"status": "2fa_required",
+                      "error": "Ce compte a la vérification en 2 étapes activée. "
+                               "La 2FA n'est pas encore supportée."})
+            return
+        except PhoneCodeInvalid:
+            out_json({"status": "error", "error": "Code incorrect."})
+            return
+        except PhoneCodeExpired:
+            out_json({"status": "error", "error": "Code expiré. Renvoie un nouveau code."})
+            return
+
         session_str = await client.export_session_string()
         out_json({
             "status": "ok",
             "data": {
                 "session_string": session_str,
-                "message": "Session générée avec succès. Stockez-la dans Flutter Secure Storage."
+                "user_id": user.id if hasattr(user, "id") else None,
+                "first_name": getattr(user, "first_name", ""),
+                "username": getattr(user, "username", ""),
             }
         })
+    finally:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -399,15 +462,20 @@ def parse_args():
         description="Watchtower Telegram Source — Pyrogram CLI",
         add_help=True,
     )
-    p.add_argument("--auth", action="store_true",
-                   help="Authentification initiale (génère session_string)")
-    p.add_argument("--action", choices=["metadata", "list", "stream", "search", "thumbnail"],
+    p.add_argument("--action",
+                   choices=["auth_send_code", "auth_verify_code",
+                            "metadata", "list", "stream", "search", "thumbnail"],
+                   required=True,
                    help="Action à exécuter")
     p.add_argument("--channel", type=str,
                    help="Username ou ID du canal Telegram (@canal ou -100xxx)")
     p.add_argument("--api_id", type=int, required=True, help="Telegram API ID")
     p.add_argument("--api_hash", type=str, required=True, help="Telegram API Hash")
     p.add_argument("--phone", type=str, help="Numéro de téléphone (format +242...)")
+    p.add_argument("--phone_code_hash", type=str, default="",
+                   help="Hash retourné par auth_send_code (requis pour auth_verify_code)")
+    p.add_argument("--code", type=str, default="",
+                   help="Code OTP reçu sur Telegram (requis pour auth_verify_code)")
     p.add_argument("--session", type=str, default="",
                    help="Session string Pyrogram (StringSession)")
     p.add_argument("--offset", type=int, default=0, help="Offset pour la liste")
@@ -424,11 +492,20 @@ async def main():
     args = parse_args()
 
     try:
-        if args.auth:
+        if args.action == "auth_send_code":
             if not args.phone:
-                out_json({"status": "error", "error": "--phone requis pour --auth"})
+                out_json({"status": "error", "error": "--phone requis pour auth_send_code"})
                 sys.exit(1)
-            await action_auth(args.api_id, args.api_hash, args.phone, args.timeout)
+            await action_auth_send_code(args.api_id, args.api_hash, args.phone)
+
+        elif args.action == "auth_verify_code":
+            if not args.phone or not args.phone_code_hash or not args.code:
+                out_json({"status": "error",
+                          "error": "--phone, --phone_code_hash et --code requis pour auth_verify_code"})
+                sys.exit(1)
+            await action_auth_verify_code(
+                args.api_id, args.api_hash, args.phone,
+                args.phone_code_hash, args.code)
 
         elif args.action == "metadata":
             if not args.channel:
@@ -466,7 +543,7 @@ async def main():
                                    args.channel, args.msg_id, args.timeout)
 
         else:
-            out_json({"status": "error", "error": "Action non reconnue. Utilise --auth ou --action <cmd>"})
+            out_json({"status": "error", "error": f"Action non reconnue: {args.action}"})
             sys.exit(1)
 
     except AuthKeyUnregistered:
