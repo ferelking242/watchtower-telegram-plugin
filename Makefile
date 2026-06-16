@@ -27,7 +27,7 @@ lint:
 
 deps:
 	@echo "📦 Installation des dépendances de dev..."
-	@pip3 install pyrogram==2.0.106 tgcrypto==1.2.5
+	@pip3 install pyrogram>=2.0.106 tgcrypto>=1.2.5
 
 help:
 	@echo "Watchtower Telegram Source Plugin — Makefile"
