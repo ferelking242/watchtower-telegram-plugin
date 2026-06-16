@@ -1,0 +1,125 @@
+name: Build Telegram Source Plugin
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Lint & Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install pyrogram==2.0.106 tgcrypto==1.2.5 flake8
+
+      - name: Syntax check
+        run: python3 -m py_compile script.py && echo "✅ Syntax OK"
+
+      - name: Validate manifest.json
+        run: |
+          python3 -c "
+          import json, sys
+          with open('manifest.json') as f:
+              m = json.load(f)
+          required = ['id','name','version','author','runtime','ui','permissions','entry']
+          missing = [k for k in required if k not in m]
+          if missing:
+              print('❌ Champs manquants dans manifest.json:', missing)
+              sys.exit(1)
+          print('✅ manifest.json valide')
+          print(f'   Plugin: {m[\"id\"]} v{m[\"version\"]}')
+          "
+
+      - name: Lint
+        run: flake8 script.py --max-line-length=120 --ignore=E501,W503 || true
+
+      - name: Test CLI help
+        run: python3 script.py --help || true
+
+  build:
+    name: Build APK
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        run: |
+          sudo apt-get install -y zip
+          pip install pyrogram==2.0.106 tgcrypto==1.2.5
+
+      - name: Build APK
+        run: |
+          chmod +x build.sh
+          bash build.sh
+
+      - name: List dist
+        run: ls -lh dist/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: telegram-source-plugin-apk
+          path: dist/*.apk
+          retention-days: 30
+
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: telegram-source-plugin-apk
+          path: dist/
+
+      - name: Read version from manifest
+        id: version
+        run: |
+          VERSION=$(python3 -c "import json; print(json.load(open('manifest.json'))['version'])")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.apk
+          name: "Telegram Source v${{ steps.version.outputs.version }}"
+          body: |
+            ## Watchtower Telegram Source Plugin v${{ steps.version.outputs.version }}
+
+            Plugin qui utilise un canal Telegram comme source de manga/comics dans Watchtower.
+
+            ### Installation
+            1. Télécharger le fichier `.apk` ci-dessous
+            2. Dans Watchtower → Extensions → Installer depuis un fichier
+            3. Configurer `api_id` et `api_hash` depuis [my.telegram.org](https://my.telegram.org)
+            4. S'authentifier via le code OTP Telegram
+
+            ### Formats supportés
+            CBR · CBZ · ZIP · PDF · EPUB · RAR
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
