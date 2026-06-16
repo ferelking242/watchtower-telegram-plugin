@@ -1,0 +1,116 @@
+{
+  "id": "com.watchtower.telegram-source",
+  "name": "Telegram Source",
+  "version": "1.0.0",
+  "author": "Watchtower Team",
+  "description": "Utilise un canal Telegram comme source de manga, comics, novels et documents.",
+  "longDescription": "Connecte-toi à n'importe quel canal Telegram public ou privé et accède à ses fichiers CBR/CBZ/ZIP/PDF/EPUB directement dans Watchtower. Le canal devient une bibliothèque de lecture complète avec cover, description et liste de chapitres.\n\n**Propulsé par Pyrogram** — connexion via compte utilisateur Telegram, pas un bot. Support du streaming chunk par chunk, de la recherche dans le canal et de la génération de thumbnails depuis les archives.\n\n**Première utilisation** : une authentification Telegram est requise (code OTP envoyé sur l'app Telegram).",
+  "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/82/Telegram_logo.svg/256px-Telegram_logo.svg.png",
+  "banner": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/82/Telegram_logo.svg/1200px-Telegram_logo.svg.png",
+  "category": "reader",
+  "tags": [
+    "telegram",
+    "manga",
+    "comics",
+    "cbr",
+    "cbz",
+    "pdf",
+    "epub",
+    "reader",
+    "source"
+  ],
+  "runtime": "binary",
+  "ui": "declarative",
+  "permissions": [
+    "network",
+    "storage.read",
+    "storage.write",
+    "reader",
+    "account",
+    "crypto"
+  ],
+  "requirements": [
+    {
+      "id": "libpython",
+      "version": ">=3.11.0",
+      "optional": false,
+      "reason": "libpython exécute le script Pyrogram nativement sur Android."
+    }
+  ],
+  "commandScopes": [
+    {
+      "command": "python",
+      "description": "Run Pyrogram Telegram source script"
+    }
+  ],
+  "networkAccess": {
+    "allowedDomains": [
+      "*.telegram.org",
+      "*.t.me",
+      "*.core.telegram.org",
+      "149.154.160.0/20",
+      "91.108.4.0/22"
+    ]
+  },
+  "entry": "script.py",
+  "scriptRuntime": "python3.11",
+  "userConfig": {
+    "fields": [
+      {
+        "key": "api_id",
+        "type": "string",
+        "label": "Telegram API ID",
+        "description": "Obtenu sur my.telegram.org — section API development tools",
+        "required": true,
+        "secret": false
+      },
+      {
+        "key": "api_hash",
+        "type": "string",
+        "label": "Telegram API Hash",
+        "description": "Obtenu sur my.telegram.org — section API development tools",
+        "required": true,
+        "secret": true
+      },
+      {
+        "key": "session_string",
+        "type": "string",
+        "label": "Session String",
+        "description": "Généré automatiquement à la première connexion. Stocké de façon sécurisée.",
+        "required": false,
+        "secret": true,
+        "generated": true
+      },
+      {
+        "key": "chunk_size",
+        "type": "select",
+        "label": "Taille des chunks de streaming",
+        "options": ["32768", "65536", "131072", "262144"],
+        "default": "65536",
+        "description": "Taille en octets des blocs de téléchargement. Plus grand = plus rapide mais plus de RAM."
+      },
+      {
+        "key": "timeout",
+        "type": "number",
+        "label": "Timeout réseau (secondes)",
+        "default": 30,
+        "description": "Délai max avant abandon d'une requête Telegram."
+      }
+    ]
+  },
+  "watchtower": {
+    "minVersion": "8.1.0",
+    "apis": [
+      "HTTP",
+      "Reader",
+      "Storage",
+      "Cache",
+      "SecureStorage"
+    ]
+  },
+  "license": "MIT",
+  "repository": "https://github.com/ferelking242/watchtower-telegram-plugin",
+  "isNsfw": false,
+  "requiresAccount": true,
+  "paywall": "free"
+}
