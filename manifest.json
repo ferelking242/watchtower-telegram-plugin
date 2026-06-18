@@ -8,73 +8,20 @@
   "icon": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/82/Telegram_logo.svg/256px-Telegram_logo.svg.png",
   "banner": "https://upload.wikimedia.org/wikipedia/commons/thumb/8/82/Telegram_logo.svg/1200px-Telegram_logo.svg.png",
   "category": "reader",
-  "tags": [
-    "telegram",
-    "manga",
-    "comics",
-    "cbr",
-    "cbz",
-    "pdf",
-    "epub",
-    "reader",
-    "source"
-  ],
+  "tags": ["telegram","manga","comics","cbr","cbz","pdf","epub","reader","source"],
   "runtime": "binary",
-  "ui": "flutter_eval",
+  "ui": {
+    "method": "eval",
+    "evalSource": "ui/main.dart"
+  },
   "entry": "script.py",
   "scriptRuntime": "python3.11",
-  "permissions": [
-    "network",
-    "storage.read",
-    "storage.write",
-    "reader",
-    "account",
-    "crypto"
-  ],
-  "requirements": [
-    {
-      "id": "libpython",
-      "version": ">=3.11.0",
-      "optional": false,
-      "reason": "libpython runs the Pyrogram script natively on Android."
-    }
-  ],
-  "commandScopes": [
-    {
-      "command": "python",
-      "description": "Run Pyrogram Telegram source script",
-      "actions": [
-        "auth_send_code",
-        "auth_verify_code",
-        "auth_check_password",
-        "metadata",
-        "list",
-        "stream",
-        "search",
-        "thumbnail"
-      ]
-    }
-  ],
-  "networkAccess": {
-    "allowedDomains": [
-      "*.telegram.org",
-      "*.t.me",
-      "*.core.telegram.org"
-    ]
-  },
-  "userConfig": {
-    "fields": []
-  },
-  "watchtower": {
-    "minVersion": "8.1.0",
-    "apis": [
-      "HTTP",
-      "Reader",
-      "Storage",
-      "SecureStorage",
-      "Cache"
-    ]
-  },
+  "permissions": ["network","storage.read","storage.write","reader","account","crypto"],
+  "requirements": [{"id":"libpython","version":">=3.11.0","optional":false,"reason":"libpython runs the Pyrogram script natively on Android."}],
+  "commandScopes": [{"command":"python","description":"Run Pyrogram Telegram source script","actions":["auth_send_code","auth_verify_code","auth_check_password","metadata","list","stream","search","thumbnail"]}],
+  "networkAccess": {"allowedDomains":["*.telegram.org","*.t.me","*.core.telegram.org"]},
+  "userConfig": {"fields":[]},
+  "watchtower": {"minVersion":"8.1.0","apis":["HTTP","Reader","Storage","SecureStorage","Cache"]},
   "license": "MIT",
   "repository": "https://github.com/ferelking242/watchtower-telegram-plugin",
   "isNsfw": false,
