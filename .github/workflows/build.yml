@@ -23,34 +23,32 @@ jobs:
           cache: 'pip'
 
       - name: Install dependencies
-        run: pip install pyrogram==2.0.106 tgcrypto==1.2.5 flake8
+        run: pip install pyrogram tgcrypto flake8 --quiet
 
       - name: Syntax check
-        run: python3 -m py_compile script.py && echo "✅ Syntax OK"
+        run: python3 -m py_compile script.py && echo "OK Syntax OK"
 
       - name: Validate manifest.json
         run: |
-          python3 -c "
+          python3 - <<'PYEOF'
           import json, sys
           with open('manifest.json') as f:
               m = json.load(f)
           required = ['id','name','version','author','runtime','ui','permissions','entry']
           missing = [k for k in required if k not in m]
           if missing:
-              print('❌ Champs manquants:', missing); sys.exit(1)
-          print(f'✅ manifest.json valide — {m[\"id\"]} v{m[\"version\"]}')
-          "
+              print('FAIL Champs manquants:', missing); sys.exit(1)
+          print(f'OK manifest.json valide -- {m["id"]} v{m["version"]}')
+          PYEOF
 
       - name: Lint
         run: flake8 script.py --max-line-length=120 --ignore=E501,W503 || true
 
-      - name: Test CLI help
-        run: |
-          python3 script.py --help
-          echo "✅ CLI help OK"
+      - name: Test help
+        run: python3 script.py --help && echo "OK CLI help OK"
 
   build:
-    name: Build Plugin ZIP + APK
+    name: Build Plugin ZIP
     runs-on: ubuntu-latest
     needs: test
     steps:
@@ -61,233 +59,122 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install build tools
-        run: sudo apt-get install -y zip unzip patchelf
-
-      - name: Setup Android NDK
-        run: |
-          # Trouver la version NDK disponible sur le runner
-          NDK_ROOT=$(ls -d /usr/local/lib/android/sdk/ndk/* 2>/dev/null | sort -V | tail -1 || true)
-          if [ -z "$NDK_ROOT" ]; then
-            echo "⚠️  NDK non trouvé dans le runner standard, installation..."
-            sudo apt-get install -y wget
-            wget -q "https://dl.google.com/android/repository/android-ndk-r27c-linux.zip" -O /tmp/ndk.zip
-            sudo unzip -q /tmp/ndk.zip -d /usr/local/lib/android/sdk/ndk/
-            NDK_ROOT="/usr/local/lib/android/sdk/ndk/android-ndk-r27c"
-          fi
-          echo "NDK_ROOT=$NDK_ROOT" >> "$GITHUB_ENV"
-          CC="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android21-clang"
-          echo "NDK_CC=$CC" >> "$GITHUB_ENV"
-          echo "✅ NDK : $NDK_ROOT"
-          $CC --version
-
-      - name: Extraire en-têtes Python 3.11 ARM64 depuis youtubedl-android
+      - name: Bundle Python deps (Android ARM64)
         run: |
           set -euo pipefail
-          BASE="https://raw.githubusercontent.com/JunkFood02/youtubedl-android/master/library/src/main/jniLibs"
-          mkdir -p /tmp/py_arm64_headers
+          mkdir -p build/plugin
 
-          # Télécharger libpython.zip.so (zip archive = stdlib + headers)
-          curl -fsSL "${BASE}/arm64-v8a/libpython.zip.so" -o /tmp/libpython.zip.so
-          echo "libpython.zip.so: $(du -sh /tmp/libpython.zip.so)"
+          # pyrogram — pure Python, works cross-platform
+          echo ":: pyrogram..."
+          pip install pyrogram \
+            --target build/plugin/ \
+            --platform manylinux2014_aarch64 \
+            --only-binary :all: \
+            --python-version 311 \
+            --implementation cp \
+            --no-cache-dir --quiet || \
+          pip install pyrogram \
+            --target build/plugin/ \
+            --no-cache-dir --quiet
 
-          # Extraire les headers Python 3.11 ARM64
-          unzip -q /tmp/libpython.zip.so "usr/include/python3.11/*" -d /tmp/py_arm64_headers 2>/dev/null || \
-          unzip -q /tmp/libpython.zip.so "include/python3.11/*" -d /tmp/py_arm64_headers 2>/dev/null || \
-          unzip -q /tmp/libpython.zip.so "python3.11/*" -d /tmp/py_arm64_headers 2>/dev/null || true
+          # tgcrypto — C extension, ARM64 wheel from PyPI
+          echo ":: tgcrypto..."
+          pip install tgcrypto \
+            --target build/plugin/ \
+            --platform manylinux2014_aarch64 \
+            --only-binary :all: \
+            --python-version 311 \
+            --implementation cp \
+            --no-cache-dir --quiet || \
+          pip install tgcrypto \
+            --target build/plugin/ \
+            --no-cache-dir --quiet
 
-          # Localiser Python.h
-          PY_H=$(find /tmp/py_arm64_headers -name "Python.h" 2>/dev/null | head -1)
-          if [ -n "$PY_H" ]; then
-            PY_INC=$(dirname "$PY_H")
-            echo "PY_ARM64_INC=$PY_INC" >> "$GITHUB_ENV"
-            echo "✅ En-têtes ARM64 trouvés : $PY_INC"
-          else
-            # Fallback : headers du runner (x86_64) — OK pour tgcrypto (API-only, pas layout)
-            PY_INC=$(python3 -c "import sysconfig; print(sysconfig.get_path('include'))")
-            echo "PY_ARM64_INC=$PY_INC" >> "$GITHUB_ENV"
-            echo "⚠️  Headers ARM64 non trouvés dans zip, fallback x86_64 headers: $PY_INC"
-          fi
+          # cryptg — optional accelerator
+          echo ":: cryptg (optionnel)..."
+          pip install cryptg \
+            --target build/plugin/ \
+            --platform manylinux2014_aarch64 \
+            --only-binary :all: \
+            --python-version 311 \
+            --implementation cp \
+            --no-cache-dir --quiet || true
 
-      - name: Compiler tgcrypto pour ARM64 Android (NATIF — pas de fallback)
+          echo ":: Deps bundled:"
+          ls build/plugin/
+
+      - name: Assemble ZIP
         run: |
           set -euo pipefail
-          mkdir -p /tmp/tgcrypto_build /tmp/tgcrypto_out
+          PLUGIN_ID="com.watchtower.telegram-source"
+          PLUGIN_VERSION=$(python3 -c "import json; print(json.load(open('manifest.json'))['version'])")
+          ZIP_NAME="${PLUGIN_ID}_${PLUGIN_VERSION}.zip"
 
-          # Télécharger les sources
-          pip download tgcrypto==1.2.5 --no-binary tgcrypto -d /tmp/tgcrypto_build -q
-          SRC_ARCHIVE=$(find /tmp/tgcrypto_build -name "tgcrypto-*.tar.gz" | head -1)
-          echo "Source: $SRC_ARCHIVE"
+          cp script.py manifest.json build/plugin/
+          [ -d ui  ] && cp -r ui  build/plugin/ || true
+          [ -d res ] && cp -r res build/plugin/ || true
 
-          cd /tmp/tgcrypto_build
-          tar -xzf "$SRC_ARCHIVE"
-          SRC_DIR=$(find . -type d -name "tgcrypto-*" | head -1)
-          cd "$SRC_DIR"
+          mkdir -p dist
+          (cd build/plugin && zip -r "../../dist/${ZIP_NAME}" . \
+            -x "*.pyc" -x "*/__pycache__/*" -x "*.dist-info/*" -x "*.egg-info/*" -x "bin/*")
 
-          echo "=== Sources tgcrypto ==="
-          ls -la
-          C_SRC=$(find . -name "*.c" | grep -v test | head -1)
-          echo "Fichier C: $C_SRC"
+          echo "PLUGIN_VERSION=${PLUGIN_VERSION}" >> $GITHUB_ENV
+          echo "ZIP_NAME=${ZIP_NAME}" >> $GITHUB_ENV
+          SIZE=$(du -sh dist/${ZIP_NAME} | cut -f1)
+          echo "OK ZIP: dist/${ZIP_NAME} (${SIZE})"
 
-          # Compiler avec NDK clang → .so ARM64 Android
-          # Le nom du fichier DOIT matcher ce que Python cherche au import
-          SO_NAME="_tgcrypto.cpython-311-aarch64-linux-android.so"
-
-          "$NDK_CC" \
-            -shared \
-            -fPIC \
-            -O2 \
-            -I"$PY_ARM64_INC" \
-            "$C_SRC" \
-            -o "/tmp/tgcrypto_out/$SO_NAME"
-
-          echo "✅ tgcrypto compilé :"
-          ls -lh "/tmp/tgcrypto_out/$SO_NAME"
-          file "/tmp/tgcrypto_out/$SO_NAME"
-          readelf -h "/tmp/tgcrypto_out/$SO_NAME" | grep -E "Machine|Class|Type"
-
-          # Vérifier que c'est bien ARM64
-          ARCH=$(readelf -h "/tmp/tgcrypto_out/$SO_NAME" | grep "Machine" | grep -i "AArch64")
-          if [ -z "$ARCH" ]; then
-            echo "❌ ERREUR: Le .so compilé n'est pas ARM64!"
-            readelf -h "/tmp/tgcrypto_out/$SO_NAME"
-            exit 1
-          fi
-          echo "✅ Architecture AArch64 confirmée"
-
-          echo "TGCRYPTO_SO=/tmp/tgcrypto_out/$SO_NAME" >> "$GITHUB_ENV"
-
-      - name: Build Plugin ZIP
-        run: |
-          set -euo pipefail
-          chmod +x build.sh
-
-          # Passer le chemin du .so pré-compilé au build.sh
-          export TGCRYPTO_PREBUILT_SO="$TGCRYPTO_SO"
-          bash build.sh
-
-      - name: Vérifier le .so tgcrypto dans le ZIP final
-        run: |
-          echo "=== Contenu dist/ ==="
-          ls -lh dist/
-          echo "=== Vérification tgcrypto .so dans le ZIP ==="
-          unzip -l dist/*.zip | grep -i "tgcrypto" || echo "⚠️  tgcrypto .so absent du ZIP"
-          unzip -l dist/*.zip | grep "_tgcrypto" && echo "✅ _tgcrypto.so présent" || \
-            { echo "❌ _tgcrypto.so MANQUANT — build invalide"; exit 1; }
-
-      - name: Upload APK artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: telegram-source-plugin-apk
-          path: dist/*.apk
-          retention-days: 30
-
-      - name: Upload ZIP artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: telegram-source-plugin-zip
+          name: telegram-plugin-zip
           path: dist/*.zip
           retention-days: 30
 
-  release:
+  release-latest:
+    name: Release (latest)
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: telegram-plugin-zip
+          path: dist/
+
+      - name: Update latest pre-release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: Latest Build
+          body: "Automatic build from main. Includes pyrogram + tgcrypto bundled for Android ARM64."
+          files: dist/*.zip
+          draft: false
+          prerelease: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  release-tag:
     name: Release (tag)
     runs-on: ubuntu-latest
     needs: build
     if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
+      - name: Download artifact
+        uses: actions/download-artifact@v4
         with:
-          name: telegram-source-plugin-apk
+          name: telegram-plugin-zip
           path: dist/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: telegram-source-plugin-zip
-          path: dist-zip/
-
-      - name: Préparer les assets de release
-        run: |
-          cp dist-zip/*.zip dist/telegram-source.zip
-          echo "=== Assets de release ==="
-          ls -lh dist/
-
-      - name: Read version from manifest
-        id: version
-        run: |
-          VERSION=$(python3 -c "import json; print(json.load(open('manifest.json'))['version'])")
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/*.apk
-            dist/telegram-source.zip
-          name: "Telegram Source v${{ steps.version.outputs.version }}"
-          body: |
-            ## Watchtower Telegram Source Plugin v${{ steps.version.outputs.version }}
-
-            ### Contenu du ZIP
-            - `script.py` — backend Pyrogram (stream, list, 2FA)
-            - `pyrogram/` — vendoré ARM64
-            - `tgcrypto/_tgcrypto.so` — **compilé nativement ARM64 via NDK** (pas de fallback)
-            - `ui/main.dart` — Flutter Eval UI (phone_code_hash persistant, SecureStorage, 2FA)
-            - `manifest.json` — métadonnées plugin
-
-            ### Installation dans Watchtower
-            1. Télécharger `telegram-source.zip`
-            2. Dans Watchtower → Extensions → Installer depuis un fichier
-            3. Configurer `api_id` et `api_hash` depuis [my.telegram.org](https://my.telegram.org)
-            4. S'authentifier via le code OTP Telegram (2FA supportée)
+          files: dist/*.zip
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  release-latest:
-    name: Release (latest — push main)
-    runs-on: ubuntu-latest
-    needs: build
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: telegram-source-plugin-apk
-          path: dist/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: telegram-source-plugin-zip
-          path: dist-zip/
-
-      - name: Préparer les assets latest
-        run: |
-          cp dist-zip/*.zip dist/telegram-source.zip
-          ls -lh dist/
-
-      - name: Read version from manifest
-        id: version
-        run: |
-          VERSION=$(python3 -c "import json; print(json.load(open('manifest.json'))['version'])")
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Create/Update latest pre-release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: latest
-          name: "Telegram Source (latest)"
-          prerelease: true
-          files: |
-            dist/*.apk
-            dist/telegram-source.zip
-          body: |
-            Pre-release automatique du dernier commit sur `main`.
-            Version : ${{ steps.version.outputs.version }}
-
-            Télécharger `telegram-source.zip` pour l'installer dans Watchtower.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

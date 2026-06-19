@@ -39,7 +39,6 @@ try:
         PhoneCodeInvalid, PhoneCodeExpired, SessionPasswordNeeded,
         PhoneNumberInvalid, PhoneNumberBanned, PasswordHashInvalid,
     )
-    from pyrogram.sessions import StringSession
 except ImportError as e:
     print(json.dumps({"status": "error", "error": f"Pyrogram non disponible: {e}"}))
     sys.exit(1)
@@ -529,7 +528,7 @@ def parse_args():
     p.add_argument("--password", type=str, default="",
                    help="Mot de passe 2FA (requis pour auth_check_password)")
     p.add_argument("--session", type=str, default="",
-                   help="Session string Pyrogram (StringSession)")
+                   help="Session string Pyrogram")
     p.add_argument("--offset", type=int, default=0, help="Offset pour la liste")
     p.add_argument("--limit", type=int, default=20, help="Nombre d'items par page")
     p.add_argument("--msg_id", type=int, help="ID du message pour stream/thumbnail")
